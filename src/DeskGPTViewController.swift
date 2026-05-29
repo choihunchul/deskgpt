@@ -115,7 +115,7 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
         return nil
     }
     
-    // MARK: - WKNavigationDelegate: Intercept Downloads (macOS 11.3+)
+    // MARK: - WKNavigationDelegate: Intercept Downloads and Outbound Web Routing (macOS 11.3+)
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         if #available(macOS 11.3, *) {
             if navigationAction.shouldPerformDownload {
@@ -123,6 +123,35 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
                 return
             }
         }
+        
+        // Intercept and route outbound external links safely to default macOS Safari
+        if let url = navigationAction.request.url {
+            let host = url.host?.lowercased() ?? ""
+            
+            // Whitelist of domains allowed to remain inside DeskGPT
+            let allowedHosts = [
+                "chatgpt.com", 
+                "openai.com", 
+                "oaiusercontent.com", 
+                "auth0.com", 
+                "appleid.apple.com", 
+                "accounts.google.com", 
+                "sentry.io"
+            ]
+            
+            // Allow hosts that match exactly or are subdomains of whitelisted domains
+            let isAllowed = host.isEmpty || allowedHosts.contains { allowed in
+                host == allowed || host.hasSuffix("." + allowed)
+            }
+            
+            if !isAllowed {
+                print("🌐 Outbound link routed to Safari: \(url.absoluteString)")
+                NSWorkspace.shared.open(url)
+                decisionHandler(.cancel)
+                return
+            }
+        }
+        
         decisionHandler(.allow)
     }
     
