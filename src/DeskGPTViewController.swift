@@ -266,15 +266,40 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
                     return titlesToRemove.contains { title.contains($0) }
                 }
                 
-                // Construct our premium custom Save Image item
-                let customItem = NSMenuItem(title: "Save Image As... (DeskGPT)", action: #selector(self.customSaveImageAction(_:)), keyEquivalent: "")
-                customItem.target = self
-                customItem.representedObject = url
+                // Add direct download menu item
+                let directItem = NSMenuItem(title: "Save Image to Downloads (DeskGPT)", action: #selector(self.customSaveImageDirectAction(_:)), keyEquivalent: "")
+                directItem.target = self
+                directItem.representedObject = url
+                menu.insertItem(directItem, at: 0)
                 
-                // Insert at the top of the context menu
-                menu.insertItem(customItem, at: 0)
-                print("🚀 willOpenMenu: Successfully inserted Save Image As... (DeskGPT) context menu item.")
+                // Add custom save-as item
+                let saveAsItem = NSMenuItem(title: "Save Image As... (DeskGPT)", action: #selector(self.customSaveImageAction(_:)), keyEquivalent: "")
+                saveAsItem.target = self
+                saveAsItem.representedObject = url
+                menu.insertItem(saveAsItem, at: 1)
+                
+                print("🚀 willOpenMenu: Successfully inserted Save Image items (Direct & Save-As).")
             }
+        }
+    }
+    
+    @objc func customSaveImageDirectAction(_ sender: NSMenuItem) {
+        guard let imageUrl = sender.representedObject as? URL else { return }
+        
+        // Deduce filename
+        var filename = imageUrl.lastPathComponent
+        if !filename.contains(".") {
+            filename = "image.png"
+        }
+        
+        // Compute the safe unique destination URL inside the Downloads folder
+        let destinationUrl = getUniqueDownloadsURL(suggestedName: filename)
+        print("🚀 Save Direct: Saving straight to \(destinationUrl.path)")
+        
+        if imageUrl.scheme == "data" {
+            self.saveDataURL(imageUrl, to: destinationUrl)
+        } else {
+            self.downloadImage(from: imageUrl, to: destinationUrl)
         }
     }
     
@@ -297,6 +322,31 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
                 self.downloadImage(from: imageUrl, to: destinationUrl)
             }
         }
+    }
+    
+    // Resolves duplicate filenames inside ~/Downloads by appending a standard counter e.g., image (1).png
+    private func getUniqueDownloadsURL(suggestedName: String) -> URL {
+        let downloadsUrl = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+        let name = suggestedName.isEmpty ? "image.png" : suggestedName
+        
+        let fileManager = FileManager.default
+        var destinationUrl = downloadsUrl.appendingPathComponent(name)
+        
+        if fileManager.fileExists(atPath: destinationUrl.path) {
+            let fileExtension = destinationUrl.pathExtension
+            let baseName = destinationUrl.deletingPathExtension().lastPathComponent
+            var counter = 1
+            while true {
+                let newName = "\(baseName) (\(counter)).\(fileExtension)"
+                let newUrl = downloadsUrl.appendingPathComponent(newName)
+                if !fileManager.fileExists(atPath: newUrl.path) {
+                    destinationUrl = newUrl
+                    break
+                }
+                counter += 1
+            }
+        }
+        return destinationUrl
     }
     
     private func downloadImage(from url: URL, to destination: URL) {
