@@ -1,0 +1,8 @@
+# Build and Release artifacts
+build/
+.DS_Store
+
+# User-specific / temp files
+*.swp
+*.o
+*.log
