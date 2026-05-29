@@ -245,29 +245,28 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
     
     // MARK: - WKDownloadDelegate
     func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
-        let savePanel = NSSavePanel()
-        savePanel.nameFieldStringValue = suggestedFilename
-        
-        savePanel.begin { response in
-            if response == .OK, let url = savePanel.url {
-                completionHandler(url)
-            } else {
-                completionHandler(nil)
-            }
+        // Hijack the WKDownload lifecycle to bypass system NSSavePanel dialogs and cookies issues!
+        if let url = response.url {
+            let filename = suggestedFilename.isEmpty ? "image.png" : suggestedFilename
+            let destinationUrl = self.getUniqueDownloadsURL(suggestedName: filename)
+            
+            print("🚀 WKDownload Interceptor: Routing native download safely for \(url.absoluteString)")
+            
+            // Route to our secure cookie-synced Swift URLSession downloader
+            self.downloadImage(from: url, to: destinationUrl)
         }
+        
+        // Pass nil to the completionHandler to instantly cancel the system Save Panel / native thread
+        completionHandler(nil)
     }
     
     func downloadDidFinish(_ download: WKDownload) {
-        NSSound.beep()
+        // No-op here since our custom URLSession downloader handles sounds and completion popups
     }
     
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
-        let alert = NSAlert()
-        alert.messageText = "다운로드 실패"
-        alert.informativeText = error.localizedDescription
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "확인")
-        alert.runModal()
+        // Log error safely but bypass generic UI alert to avoid interrupting custom downloads
+        print("ℹ️ WKDownload thread naturally terminated or bypassed: \(error.localizedDescription)")
     }
     
     // MARK: - Navigation, Zoom, and Utility Controls
