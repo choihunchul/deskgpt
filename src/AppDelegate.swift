@@ -3,6 +3,7 @@ import Cocoa
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var window: NSWindow?
     var viewController: DeskGPTViewController?
+    private var imageContextMenuMonitor: Any?
     
     var pdfWindow: NSWindow?
     var pdfViewController: DeskGPTPDFViewController?
@@ -36,8 +37,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         win.makeKeyAndOrderFront(nil)
         
         // Bring the window and application strictly to the foreground
-        NSApp.activate(ignoringOtherApps: true)
+        activateMainWindow()
         print("🚀 AppDelegate: Direct NSWindow created, ordered front, and app activated...")
+
+        installImageContextMenuMonitor()
         
         setupMenu()
         print("🚀 AppDelegate: setupMenu finished...")
@@ -45,7 +48,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
-            window?.makeKeyAndOrderFront(nil)
+            activateMainWindow()
         }
         return true
     }
@@ -126,10 +129,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
         editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
         editMenu.addItem(NSMenuItem.separator())
-        editMenu.addItem(withTitle: "Cut", action: Selector(("cut:")), keyEquivalent: "x")
-        editMenu.addItem(withTitle: "Copy", action: Selector(("copy:")), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "Paste", action: Selector(("paste:")), keyEquivalent: "v")
-        editMenu.addItem(withTitle: "Select All", action: Selector(("selectAll:")), keyEquivalent: "a")
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         
         let editMenuItem = NSMenuItem()
         editMenuItem.submenu = editMenu
@@ -185,4 +188,67 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     
     @objc func resetSessionAction() { viewController?.resetSession() }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            viewController?.handleIncomingURL(url)
+        }
+
+        activateMainWindow()
+        viewController?.activateForExternalPrompt()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        activateMainWindow()
+    }
+
+    private func activateMainWindow() {
+        guard let window = window else {
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        window.makeMain()
+        window.makeKey()
+    }
+
+    private func installImageContextMenuMonitor() {
+        guard imageContextMenuMonitor == nil else { return }
+
+        imageContextMenuMonitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .leftMouseDown]) { [weak self] event in
+            guard let self = self,
+                  let viewController = self.viewController,
+                  let webView = viewController.webView as? DeskGPTWebView
+            else {
+                return event
+            }
+
+            let isRightClick = event.type == .rightMouseDown
+            let isControlClick = event.type == .leftMouseDown && event.modifierFlags.contains(.control)
+            guard isRightClick || isControlClick else {
+                return event
+            }
+
+            guard webView.cachedContextMenuImageUrl != nil else {
+                return event
+            }
+
+            let viewPoint = webView.convert(event.locationInWindow, from: nil)
+            guard webView.bounds.contains(viewPoint) else {
+                return event
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+                guard let refreshedImageUrl = (viewController.webView as? DeskGPTWebView)?.cachedContextMenuImageUrl ?? webView.cachedContextMenuImageUrl else {
+                    return
+                }
+                viewController.presentImageContextMenu(imageUrl: refreshedImageUrl, viewPoint: viewPoint)
+            }
+
+            return nil
+        }
+    }
 }

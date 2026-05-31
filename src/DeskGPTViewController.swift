@@ -1,9 +1,112 @@
 import Cocoa
+import ObjectiveC.runtime
 import WebKit
 
-class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
+protocol DeskGPTMenuDelegate: AnyObject {
+    func webView(_ webView: WKWebView, willOpenMenu menu: NSMenu, with event: NSEvent)
+    func webView(_ webView: WKWebView, didRightClickImage imageUrl: URL, with event: NSEvent)
+}
+
+class DeskGPTWebView: WKWebView {
+    weak var menuDelegate: DeskGPTMenuDelegate?
+    var cachedContextMenuImageUrl: URL?
+    
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = super.menu(for: event)
+        if let menu = menu {
+            menu.delegate = menuDelegate as? NSMenuDelegate
+            menuDelegate?.webView(self, willOpenMenu: menu, with: event)
+        }
+        return menu
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        if let imageUrl = cachedContextMenuImageUrl {
+            menuDelegate?.webView(self, didRightClickImage: imageUrl, with: event)
+            return
+        }
+
+        super.rightMouseDown(with: event)
+    }
+}
+
+private enum DeskGPTWebKitContextMenuSwizzler {
+    static var didInstall = false
+
+    static func install() {
+        guard !didInstall else { return }
+        didInstall = true
+
+        let targetClassNames = ["WKContentView", "WKApplicationStateTrackingView"]
+        for className in targetClassNames {
+            guard let targetClass = NSClassFromString(className) else { continue }
+            swizzle(targetClass, original: #selector(NSResponder.rightMouseDown(with:)), replacement: #selector(NSView.deskgpt_rightMouseDown(with:)))
+            swizzle(targetClass, original: #selector(NSView.menu(for:)), replacement: #selector(NSView.deskgpt_menu(for:)))
+        }
+    }
+
+    private static func swizzle(_ targetClass: AnyClass, original: Selector, replacement: Selector) {
+        guard
+            let originalMethod = class_getInstanceMethod(targetClass, original),
+            let replacementMethod = class_getInstanceMethod(NSView.self, replacement)
+        else { return }
+        method_exchangeImplementations(originalMethod, replacementMethod)
+    }
+}
+
+private extension NSView {
+    func deskGPTOwningWebView() -> DeskGPTWebView? {
+        var current: NSView? = self
+        while let view = current {
+            if let webView = view as? DeskGPTWebView {
+                return webView
+            }
+            current = view.superview
+        }
+        return nil
+    }
+
+    func deskGPTViewController() -> DeskGPTViewController? {
+        var responder: NSResponder? = self
+        while let current = responder {
+            if let controller = current as? DeskGPTViewController {
+                return controller
+            }
+            responder = current.nextResponder
+        }
+        return window?.contentViewController as? DeskGPTViewController
+    }
+
+    @objc func deskgpt_menu(for event: NSEvent) -> NSMenu? {
+        if let controller = deskGPTViewController(),
+           let webView = controller.webView as? DeskGPTWebView,
+           let imageUrl = webView.cachedContextMenuImageUrl {
+            return controller.makeImageContextMenu(imageUrl: imageUrl)
+        }
+        return self.deskgpt_menu(for: event)
+    }
+
+    @objc func deskgpt_rightMouseDown(with event: NSEvent) {
+        if let controller = deskGPTViewController(),
+           let webView = controller.webView as? DeskGPTWebView,
+           let imageUrl = webView.cachedContextMenuImageUrl {
+            let viewPoint = webView.convert(event.locationInWindow, from: nil)
+            controller.presentImageContextMenu(imageUrl: imageUrl, viewPoint: viewPoint)
+            return
+        }
+        self.deskgpt_rightMouseDown(with: event)
+    }
+}
+
+class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, DeskGPTMenuDelegate, NSMenuDelegate {
     var webView: WKWebView!
-    var lastRightClickedImageUrl: URL? // Synchronous cache for context menu images
+    var lastContextMenuImageUrl: URL?
+    private var pendingExternalPrompt: String?
+    private var pendingExternalPromptAttempts: Int = 0
+    private var externalPromptRetryTimer: DispatchWorkItem?
+    private var composerFocusRetryTimer: DispatchWorkItem?
+    private var externalPromptPollTimer: DispatchSourceTimer?
+    private let raycastInboxURL = URL(fileURLWithPath: "/private/tmp/deskgpt-raycast-inbox.txt")
     
     override func loadView() {
         let webConfiguration = WKWebViewConfiguration()
@@ -16,7 +119,10 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
         // Configure WKUserContentController for JS message posting and script injection
         let userContentController = WKUserContentController()
         userContentController.add(self, name: "directSaveImage")
-        userContentController.add(self, name: "rightClickImageDetected") // Register synchronous cache handler
+        userContentController.add(self, name: "saveImageAs")
+        userContentController.add(self, name: "copyImage")
+        userContentController.add(self, name: "rightClickImageDetected")
+        userContentController.add(self, name: "externalPromptStatus")
         
         let jsSource = """
         (function() {
@@ -99,42 +205,106 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
             var observer = new MutationObserver(scanAndAttach);
             observer.observe(document.body, { childList: true, subtree: true });
 
-            // 3. Listen to contextmenu event to pre-cache image URL synchronously
-            window.addEventListener('contextmenu', function(event) {
+            window.addEventListener('mousedown', function(event) {
+                if (!window.webkit || !window.webkit.messageHandlers || !window.webkit.messageHandlers.rightClickImageDetected) {
+                    return;
+                }
+
+                if (event.button !== 2 && !(event.button === 0 && event.ctrlKey)) {
+                    return;
+                }
+
                 var elements = document.elementsFromPoint(event.clientX, event.clientY);
                 var imgSrc = "";
+
                 if (elements && elements.length > 0) {
                     for (var i = 0; i < elements.length; i++) {
                         var el = elements[i];
+                        if (!el) continue;
+
                         if (el.tagName === 'IMG') {
-                            imgSrc = el.src;
+                            imgSrc = el.src || "";
                             break;
                         }
                         if (el.tagName === 'CANVAS') {
-                            imgSrc = el.toDataURL();
+                            try {
+                                imgSrc = el.toDataURL();
+                            } catch (e) {
+                                imgSrc = "";
+                            }
                             break;
                         }
-                        var img = el.querySelector('img');
-                        if (img) {
-                            imgSrc = img.src;
+
+                        var nestedImg = el.querySelector && el.querySelector('img');
+                        if (nestedImg && nestedImg.src) {
+                            imgSrc = nestedImg.src;
                             break;
                         }
                     }
                 }
-                // Post detected image URL (or empty string) to pre-cache in Swift
-                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.rightClickImageDetected) {
-                    window.webkit.messageHandlers.rightClickImageDetected.postMessage(imgSrc);
-                }
+
+                window.webkit.messageHandlers.rightClickImageDetected.postMessage(imgSrc);
             }, true);
+
+            // Cache right-clicked image URLs before WebKit shows the context menu.
+            window.addEventListener('contextmenu', function(event) {
+                if (!window.webkit || !window.webkit.messageHandlers || !window.webkit.messageHandlers.rightClickImageDetected) {
+                    return;
+                }
+
+                var elements = document.elementsFromPoint(event.clientX, event.clientY);
+                var imgSrc = "";
+
+                if (elements && elements.length > 0) {
+                    for (var i = 0; i < elements.length; i++) {
+                        var el = elements[i];
+                        if (!el) continue;
+
+                        if (el.tagName === 'IMG') {
+                            imgSrc = el.src || "";
+                            break;
+                        }
+                        if (el.tagName === 'CANVAS') {
+                            try {
+                                imgSrc = el.toDataURL();
+                            } catch (e) {
+                                imgSrc = "";
+                            }
+                            break;
+                        }
+
+                        var nestedImg = el.querySelector && el.querySelector('img');
+                        if (nestedImg && nestedImg.src) {
+                            imgSrc = nestedImg.src;
+                            break;
+                        }
+
+                        var bg = window.getComputedStyle ? window.getComputedStyle(el).backgroundImage : "";
+                        if (bg && bg !== 'none') {
+                            var match = bg.match(/url\\(["']?([^"')]+)["']?\\)/);
+                            if (match && match[1]) {
+                                imgSrc = match[1];
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                window.webkit.messageHandlers.rightClickImageDetected.postMessage(imgSrc);
+            }, true);
+
         })();
         """
         let userScript = WKUserScript(source: jsSource, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
         userContentController.addUserScript(userScript)
         webConfiguration.userContentController = userContentController
         
-        webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 1200, height: 800), configuration: webConfiguration)
+        let customWebView = DeskGPTWebView(frame: CGRect(x: 0, y: 0, width: 1200, height: 800), configuration: webConfiguration)
+        customWebView.menuDelegate = self
+        webView = customWebView
         webView.navigationDelegate = self
         webView.uiDelegate = self
+        DeskGPTWebKitContextMenuSwizzler.install()
         
         // Set standard macOS Safari User Agent to bypass bot/webview block gates
         webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
@@ -147,6 +317,43 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
         if let url = URL(string: "https://chatgpt.com") {
             let request = URLRequest(url: url)
             webView.load(request)
+        }
+        startRaycastInboxPolling()
+    }
+
+    func handleIncomingURL(_ url: URL) {
+        guard url.scheme?.lowercased() == "deskgpt" else { return }
+        guard url.host?.lowercased() == "ask" else { return }
+
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let prompt = components?.queryItems?.first(where: { $0.name == "text" })?.value ?? ""
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrompt.isEmpty else { return }
+
+        handleIncomingPrompt(trimmedPrompt)
+    }
+
+    func handleIncomingPrompt(_ prompt: String) {
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrompt.isEmpty else { return }
+
+        pendingExternalPrompt = trimmedPrompt
+        pendingExternalPromptAttempts = 0
+        activateForExternalPrompt()
+        attemptToSendPendingExternalPrompt()
+    }
+
+    func activateForExternalPrompt() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            if let window = self.webView.window {
+                NSApp.activate(ignoringOtherApps: true)
+                window.makeKeyAndOrderFront(nil)
+                window.orderFrontRegardless()
+            }
+
+            self.scheduleComposerFocusRecovery(after: 0.15)
         }
     }
     
@@ -188,15 +395,12 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
             if navigationAction.shouldPerformDownload {
                 // Hijack WebKit's default context menu download action ("이미지 다운로드")
                 if let url = navigationAction.request.url {
-                    var filename = url.lastPathComponent
-                    if !filename.contains(".") {
-                        filename = "image.png"
-                    }
+                    let filename = self.getSafeFilename(for: url)
                     let destinationUrl = self.getUniqueDownloadsURL(suggestedName: filename)
                     print("🚀 Intercepted native download request for: \(url.absoluteString)")
                     
                     // Route securely to our custom downloader to sync cookies
-                    self.downloadImage(from: url, to: destinationUrl)
+                    self.processImageDownload(from: url, to: destinationUrl)
                 }
                 
                 // Cancel the native buggy thread to prevent double downloads and 403 errors
@@ -243,7 +447,7 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
                 if let url = navigationResponse.response.url {
                     let filename = navigationResponse.response.suggestedFilename ?? "file.dat"
                     let destinationUrl = self.getUniqueDownloadsURL(suggestedName: filename)
-                    self.downloadImage(from: url, to: destinationUrl)
+                    self.processImageDownload(from: url, to: destinationUrl)
                 }
                 decisionHandler(.cancel)
                 return
@@ -258,7 +462,7 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
                 if key.lowercased() == "content-disposition" && value.lowercased().contains("attachment") {
                     let filename = navigationResponse.response.suggestedFilename ?? "file.dat"
                     let destinationUrl = self.getUniqueDownloadsURL(suggestedName: filename)
-                    self.downloadImage(from: url, to: destinationUrl)
+                    self.processImageDownload(from: url, to: destinationUrl)
                     
                     decisionHandler(.cancel)
                     return
@@ -283,7 +487,7 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
             print("🚀 WKDownload Interceptor: Routing native download safely for \(url.absoluteString)")
             
             // Route to our secure cookie-synced Swift URLSession downloader
-            self.downloadImage(from: url, to: destinationUrl)
+            self.processImageDownload(from: url, to: destinationUrl)
         }
         
         // Pass nil to the completionHandler to instantly cancel the system Save Panel / native thread
@@ -316,6 +520,11 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
     
     func reloadPage() {
         webView.reload()
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        attemptToSendPendingExternalPrompt()
+        scheduleComposerFocusRecovery(after: 0.25)
     }
     
     func goBack() {
@@ -389,80 +598,78 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
         }
     }
     
-    // MARK: - WKUIDelegate: Custom Context Menu for Images (Save Image As... Fix)
+    // MARK: - DeskGPTMenuDelegate
     func webView(_ webView: WKWebView, willOpenMenu menu: NSMenu, with event: NSEvent) {
-        // Synchronously check the pre-cached right-clicked image URL
-        guard let url = self.lastRightClickedImageUrl else {
-            print("ℹ️ willOpenMenu: No cached image found at right-click coordinates.")
-            return
-        }
-        
-        // Clear any default buggy web view download items to prevent silent failures
-        let titlesToRemove = ["save image to downloads", "save image as", "download image", "이미지 저장", "다운로드", "다운로드 폴더에 이미지 저장"]
-        menu.items.removeAll { item in
+        configureImageContextMenu(menu)
+    }
+
+    func webView(_ webView: WKWebView, didRightClickImage imageUrl: URL, with event: NSEvent) {
+        self.lastContextMenuImageUrl = imageUrl
+        (self.webView as? DeskGPTWebView)?.cachedContextMenuImageUrl = imageUrl
+        let location = self.webView.convert(event.locationInWindow, from: nil)
+        self.presentImageContextMenu(imageUrl: imageUrl, viewPoint: location)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        configureImageContextMenu(menu)
+    }
+
+    private func configureImageContextMenu(_ menu: NSMenu) {
+        // Find if this menu is for an image (has standard image menu items)
+        let isImage = menu.items.contains { item in
             let title = item.title.lowercased()
-            return titlesToRemove.contains { title.contains($0) }
+            return title.contains("image") || title.contains("이미지")
         }
         
-        // Determine system preferred language to display native-like Korean/English
-        let isKorean = NSLocale.preferredLanguages.first?.hasPrefix("ko") ?? false
-        let directTitle = isKorean ? "다운로드 폴더에 이미지 저장" : "Save Image to Downloads"
-        let saveAsTitle = isKorean ? "이미지를 다른 이름으로 저장..." : "Save Image As..."
-        
-        // Add direct download menu item
-        let directItem = NSMenuItem(title: directTitle, action: #selector(self.customSaveImageDirectAction(_:)), keyEquivalent: "")
-        directItem.target = self
-        directItem.representedObject = url
-        menu.insertItem(directItem, at: 0)
-        
-        // Add custom save-as item
-        let saveAsItem = NSMenuItem(title: saveAsTitle, action: #selector(self.customSaveImageAction(_:)), keyEquivalent: "")
-        saveAsItem.target = self
-        saveAsItem.representedObject = url
-        menu.insertItem(saveAsItem, at: 1)
-        
-        print("🎯 willOpenMenu: Synchronously inserted custom menu items for: \(url.lastPathComponent)")
+        if isImage {
+            // Remove buggy WebKit save items
+            let titlesToRemove = ["save image to downloads", "save image as", "download image", "이미지 저장", "다운로드", "다운로드 폴더에 이미지 저장"]
+            menu.items.removeAll { item in
+                let title = item.title.lowercased()
+                return titlesToRemove.contains { title.contains($0) }
+            }
+            
+            // Determine system preferred language to display native-like Korean/English
+            let isKorean = NSLocale.preferredLanguages.first?.hasPrefix("ko") ?? false
+            let directTitle = isKorean ? "다운로드 폴더에 이미지 저장" : "Save Image to Downloads"
+            let saveAsTitle = isKorean ? "이미지를 다른 이름으로 저장..." : "Save Image As..."
+            
+            // Find insertion point
+            var insertIndex = 0
+            for (index, item) in menu.items.enumerated() {
+                let title = item.title.lowercased()
+                if title.contains("open image in new window") || title.contains("새 창에서 이미지 열기") {
+                    insertIndex = max(insertIndex, index + 1)
+                } else if title.contains("open image") || title.contains("이미지 열기") {
+                    insertIndex = max(insertIndex, index + 1)
+                }
+            }
+            
+            // Add custom save-as item
+            let saveAsItem = NSMenuItem(title: saveAsTitle, action: #selector(self.customSaveImageAction(_:)), keyEquivalent: "")
+            saveAsItem.target = self
+            saveAsItem.representedObject = self.lastContextMenuImageUrl
+            menu.insertItem(saveAsItem, at: insertIndex)
+            
+            // Add direct download menu item
+            let directItem = NSMenuItem(title: directTitle, action: #selector(self.customSaveImageDirectAction(_:)), keyEquivalent: "")
+            directItem.target = self
+            directItem.representedObject = self.lastContextMenuImageUrl
+            menu.insertItem(directItem, at: insertIndex)
+        }
     }
     
     @objc func customSaveImageDirectAction(_ sender: NSMenuItem) {
-        guard let imageUrl = sender.representedObject as? URL else { return }
-        
-        // Deduce filename
-        var filename = imageUrl.lastPathComponent
-        if !filename.contains(".") {
-            filename = "image.png"
-        }
-        
-        // Compute the safe unique destination URL inside the Downloads folder
-        let destinationUrl = getUniqueDownloadsURL(suggestedName: filename)
-        print("🚀 Save Direct: Saving straight to \(destinationUrl.path)")
-        
-        if imageUrl.scheme == "data" {
-            self.saveDataURL(imageUrl, to: destinationUrl)
-        } else {
-            self.downloadImage(from: imageUrl, to: destinationUrl)
-        }
+        guard let imageUrl = self.imageURL(for: sender) else { return }
+        let filename = self.getSafeFilename(for: imageUrl)
+        let destinationUrl = self.getUniqueDownloadsURL(suggestedName: filename)
+        print("🚀 Save Direct: Saving straight to \\(destinationUrl.path)")
+        self.processImageDownload(from: imageUrl, to: destinationUrl)
     }
     
     @objc func customSaveImageAction(_ sender: NSMenuItem) {
-        guard let imageUrl = sender.representedObject as? URL else { return }
-        
-        let savePanel = NSSavePanel()
-        savePanel.title = "Save Image"
-        
-        // Deduce filename
-        let filename = imageUrl.lastPathComponent
-        savePanel.nameFieldStringValue = filename.contains(".") ? filename : "image.png"
-        
-        savePanel.begin { [weak self] response in
-            guard let self = self, response == .OK, let destinationUrl = savePanel.url else { return }
-            
-            if imageUrl.scheme == "data" {
-                self.saveDataURL(imageUrl, to: destinationUrl)
-            } else {
-                self.downloadImage(from: imageUrl, to: destinationUrl)
-            }
-        }
+        guard let imageUrl = self.imageURL(for: sender) else { return }
+        self.handleSaveImageAs(url: imageUrl)
     }
     
     // Resolves duplicate filenames inside ~/Downloads by appending a standard counter e.g., image (1).png
@@ -488,6 +695,68 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
             }
         }
         return destinationUrl
+    }
+    
+    private func getSafeFilename(for url: URL) -> String {
+        if url.scheme == "data" {
+            return "image.png"
+        } else if url.scheme == "blob" {
+            return "\(url.lastPathComponent).png"
+        } else {
+            var filename = url.lastPathComponent
+            if filename.isEmpty || filename.count > 100 { return "image.png" }
+            if !filename.contains(".") { filename += ".png" }
+            return filename
+        }
+    }
+    
+    private func processImageDownload(from url: URL, to destination: URL) {
+        if url.scheme == "data" {
+            self.saveDataURL(url, to: destination)
+        } else if url.scheme == "blob" {
+            self.downloadBlobURL(url, to: destination)
+        } else {
+            self.downloadImage(from: url, to: destination)
+        }
+    }
+    
+    private func downloadBlobURL(_ url: URL, to destination: URL) {
+        let js = """
+        (function() {
+            return new Promise((resolve, reject) => {
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', '\(url.absoluteString)', true);
+                xhr.responseType = 'blob';
+                xhr.onload = function(e) {
+                    if (this.status == 200) {
+                        var blob = this.response;
+                        var reader = new FileReader();
+                        reader.readAsDataURL(blob);
+                        reader.onloadend = function() {
+                            resolve(reader.result);
+                        }
+                    } else {
+                        reject("Status: " + this.status);
+                    }
+                };
+                xhr.onerror = function() { reject("XHR Error"); };
+                xhr.send();
+            });
+        })();
+        """
+        
+        webView.evaluateJavaScript(js) { [weak self] result, error in
+            guard let self = self else { return }
+            if let error = error {
+                self.showErrorAlert(message: "Blob 이미지 추출 실패", info: error.localizedDescription)
+                return
+            }
+            if let dataUrl = result as? String, let dataUrlURL = URL(string: dataUrl) {
+                self.saveDataURL(dataUrlURL, to: destination)
+            } else {
+                self.showErrorAlert(message: "Blob 이미지 추출 실패", info: "알 수 없는 에러가 발생했습니다.")
+            }
+        }
     }
     
     private func downloadImage(from url: URL, to destination: URL) {
@@ -587,23 +856,362 @@ extension DeskGPTViewController: WKScriptMessageHandler {
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         if message.name == "directSaveImage" {
             guard let imageUrlString = message.body as? String, let url = URL(string: imageUrlString) else { return }
-            var filename = url.lastPathComponent
-            if !filename.contains(".") { filename = "image.png" }
-            let destinationUrl = getUniqueDownloadsURL(suggestedName: filename)
-            
-            if url.scheme == "data" {
-                self.saveDataURL(url, to: destinationUrl)
-            } else {
-                self.downloadImage(from: url, to: destinationUrl)
-            }
+            let filename = self.getSafeFilename(for: url)
+            let destinationUrl = self.getUniqueDownloadsURL(suggestedName: filename)
+            self.processImageDownload(from: url, to: destinationUrl)
+        } else if message.name == "saveImageAs" {
+            guard let imageUrlString = message.body as? String, let url = URL(string: imageUrlString) else { return }
+            self.handleSaveImageAs(url: url)
+        } else if message.name == "copyImage" {
+            guard let imageUrlString = message.body as? String, let url = URL(string: imageUrlString) else { return }
+            self.handleCopyImage(url: url)
         } else if message.name == "rightClickImageDetected" {
-            // Synchronously cache the image URL before the context menu displays
-            if let imageUrlString = message.body as? String, !imageUrlString.isEmpty, let url = URL(string: imageUrlString) {
-                self.lastRightClickedImageUrl = url
-                print("🎯 Cached right-clicked image URL: \(url.absoluteString)")
+            guard let imageUrlString = message.body as? String else { return }
+
+            if !imageUrlString.isEmpty, let url = URL(string: imageUrlString) {
+                self.lastContextMenuImageUrl = url
+                (self.webView as? DeskGPTWebView)?.cachedContextMenuImageUrl = url
+                print("🎯 Cached image URL under cursor: \(url.absoluteString)")
             } else {
-                self.lastRightClickedImageUrl = nil
+                self.lastContextMenuImageUrl = nil
+                (self.webView as? DeskGPTWebView)?.cachedContextMenuImageUrl = nil
+            }
+        } else if message.name == "externalPromptStatus" {
+            guard let status = message.body as? String else { return }
+            switch status {
+            case "sent":
+                pendingExternalPrompt = nil
+                pendingExternalPromptAttempts = 0
+                externalPromptRetryTimer?.cancel()
+                externalPromptRetryTimer = nil
+                scheduleComposerFocusRecovery(after: 0.35)
+            default:
+                break
             }
         }
+    }
+    
+    // MARK: - Handlers for Custom HTML Context Menu
+    private func handleSaveImageAs(url: URL) {
+        let savePanel = NSSavePanel()
+        savePanel.title = "Save Image"
+        savePanel.nameFieldStringValue = self.getSafeFilename(for: url)
+        
+        savePanel.begin { [weak self] response in
+            guard let self = self, response == .OK, let destinationUrl = savePanel.url else { return }
+            self.processImageDownload(from: url, to: destinationUrl)
+        }
+    }
+    
+    private func handleCopyImage(url: URL) {
+        if url.scheme == "data" {
+            let urlString = url.absoluteString
+            guard let commaIndex = urlString.firstIndex(of: ",") else { return }
+            let base64String = String(urlString[urlString.index(after: commaIndex)...])
+            guard let data = Data(base64Encoded: base64String, options: .ignoreUnknownCharacters),
+                  let image = NSImage(data: data) else { return }
+            
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.writeObjects([image])
+            print("📋 Copied Data URL image to clipboard")
+        } else {
+            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { cookies in
+                var request = URLRequest(url: url)
+                request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15", forHTTPHeaderField: "User-Agent")
+                let headers = HTTPCookie.requestHeaderFields(with: cookies)
+                for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
+                
+                URLSession.shared.dataTask(with: request) { data, response, error in
+                    guard let data = data, let image = NSImage(data: data) else { return }
+                    DispatchQueue.main.async {
+                        let pasteboard = NSPasteboard.general
+                        pasteboard.clearContents()
+                        pasteboard.writeObjects([image])
+                        print("📋 Copied image to clipboard")
+                    }
+                }.resume()
+            }
+        }
+    }
+
+    func presentImageContextMenu(imageUrl: URL, viewPoint: CGPoint) {
+        let menu = makeImageContextMenu(imageUrl: imageUrl)
+        menu.popUp(positioning: nil, at: viewPoint, in: self.webView)
+    }
+
+    private func attemptToSendPendingExternalPrompt() {
+        guard let prompt = pendingExternalPrompt else { return }
+        guard pendingExternalPromptAttempts < 30 else {
+            pendingExternalPrompt = nil
+            return
+        }
+
+        pendingExternalPromptAttempts += 1
+        sendPromptToChatGPT(prompt)
+
+        externalPromptRetryTimer?.cancel()
+        let retry = DispatchWorkItem { [weak self] in
+            self?.attemptToSendPendingExternalPrompt()
+        }
+        externalPromptRetryTimer = retry
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: retry)
+    }
+
+    private func sendPromptToChatGPT(_ prompt: String) {
+        let escapedPrompt = prompt
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: "\\n")
+
+        let js = """
+        (function() {
+            const prompt = '\(escapedPrompt)';
+            const postStatus = (status) => {
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.externalPromptStatus) {
+                    window.webkit.messageHandlers.externalPromptStatus.postMessage(status);
+                }
+            };
+
+            const selectors = [
+                'textarea[placeholder*="Ask anything"]',
+                'textarea[aria-label*="Ask anything"]',
+                'textarea',
+                '[contenteditable="true"]'
+            ];
+
+            let input = null;
+            for (const selector of selectors) {
+                input = document.querySelector(selector);
+                if (input) break;
+            }
+
+            if (!input) {
+                postStatus('no-input');
+                return;
+            }
+
+            const dispatchInputEvent = () => {
+                input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            };
+
+            const focusComposer = () => {
+                try {
+                    if (input.focus) {
+                        input.focus({ preventScroll: true });
+                    } else {
+                        input.focus();
+                    }
+                } catch (e) {
+                    if (input.focus) {
+                        input.focus();
+                    }
+                }
+
+                if (input.scrollIntoView) {
+                    input.scrollIntoView({ block: 'center', inline: 'nearest' });
+                }
+            };
+
+            if (input.tagName === 'TEXTAREA') {
+                const descriptor = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+                if (descriptor && descriptor.set) {
+                    descriptor.set.call(input, prompt);
+                } else {
+                    input.value = prompt;
+                }
+                dispatchInputEvent();
+                focusComposer();
+            } else {
+                focusComposer();
+                input.textContent = prompt;
+                dispatchInputEvent();
+            }
+
+            const trySend = () => {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                const sendButton = buttons.find((button) => {
+                    const label = [
+                        button.getAttribute('aria-label') || '',
+                        button.getAttribute('title') || '',
+                        button.innerText || '',
+                        button.textContent || ''
+                    ].join(' ').toLowerCase();
+                    return /send|전송|보내기|prompt/.test(label) && !button.disabled;
+                });
+
+                if (sendButton) {
+                    sendButton.click();
+                    postStatus('sent');
+                    return true;
+                }
+
+                if (input && input.dispatchEvent) {
+                    focusComposer();
+                    input.dispatchEvent(new KeyboardEvent('keydown', {
+                        key: 'Enter',
+                        code: 'Enter',
+                        bubbles: true,
+                        cancelable: true
+                    }));
+                    input.dispatchEvent(new KeyboardEvent('keyup', {
+                        key: 'Enter',
+                        code: 'Enter',
+                        bubbles: true,
+                        cancelable: true
+                    }));
+                    postStatus('sent');
+                    return true;
+                }
+
+                postStatus('not-ready');
+                return false;
+            };
+
+            setTimeout(trySend, 250);
+        })();
+        """
+
+        webView.evaluateJavaScript(js) { _, error in
+            if let error = error {
+                print("⚠️ Raycast prompt injection failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func scheduleComposerFocusRecovery(after delay: TimeInterval) {
+        composerFocusRetryTimer?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.focusChatComposer()
+        }
+
+        composerFocusRetryTimer = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func focusChatComposer() {
+        let js = """
+        (function() {
+            const selectors = [
+                '#prompt-textarea',
+                'textarea[placeholder*="Ask anything"]',
+                'textarea[aria-label*="Ask anything"]',
+                'textarea',
+                '[contenteditable="true"]'
+            ];
+
+            let input = null;
+            for (const selector of selectors) {
+                input = document.querySelector(selector);
+                if (input) break;
+            }
+
+            if (!input) {
+                return false;
+            }
+
+            try {
+                if (input.focus) {
+                    input.focus({ preventScroll: true });
+                } else {
+                    input.focus();
+                }
+            } catch (e) {
+                input.focus();
+            }
+
+            if (input.scrollIntoView) {
+                input.scrollIntoView({ block: 'center', inline: 'nearest' });
+            }
+
+            return true;
+        })();
+        """
+
+        webView.evaluateJavaScript(js) { _, error in
+            if let error = error {
+                print("⚠️ Composer focus recovery failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func startRaycastInboxPolling() {
+        guard externalPromptPollTimer == nil else { return }
+
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        timer.schedule(deadline: .now() + 0.25, repeating: 0.5)
+        timer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            guard self.pendingExternalPrompt == nil else { return }
+            guard FileManager.default.fileExists(atPath: self.raycastInboxURL.path) else { return }
+
+            do {
+                let prompt = try String(contentsOf: self.raycastInboxURL, encoding: .utf8)
+                try FileManager.default.removeItem(at: self.raycastInboxURL)
+                let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmedPrompt.isEmpty else { return }
+
+                DispatchQueue.main.async {
+                    self.handleIncomingPrompt(trimmedPrompt)
+                }
+            } catch {
+                print("⚠️ Failed to read Raycast inbox: \(error.localizedDescription)")
+            }
+        }
+        timer.resume()
+        externalPromptPollTimer = timer
+    }
+
+    func makeImageContextMenu(imageUrl: URL) -> NSMenu {
+        let isKorean = NSLocale.preferredLanguages.first?.hasPrefix("ko") ?? false
+        let directTitle = isKorean ? "다운로드 폴더에 이미지 저장" : "Save Image to Downloads"
+        let saveAsTitle = isKorean ? "이미지를 다른 이름으로 저장..." : "Save Image As..."
+        let copyAddressTitle = isKorean ? "이미지 주소 복사" : "Copy Image Address"
+        let copyImageTitle = isKorean ? "이미지 복사" : "Copy Image"
+
+        let menu = NSMenu()
+
+        let directItem = NSMenuItem(title: directTitle, action: #selector(self.customSaveImageDirectAction(_:)), keyEquivalent: "")
+        directItem.target = self
+        directItem.representedObject = imageUrl
+        menu.addItem(directItem)
+
+        let saveAsItem = NSMenuItem(title: saveAsTitle, action: #selector(self.customSaveImageAction(_:)), keyEquivalent: "")
+        saveAsItem.target = self
+        saveAsItem.representedObject = imageUrl
+        menu.addItem(saveAsItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let copyAddressItem = NSMenuItem(title: copyAddressTitle, action: #selector(self.copyImageAddressAction(_:)), keyEquivalent: "")
+        copyAddressItem.target = self
+        copyAddressItem.representedObject = imageUrl
+        menu.addItem(copyAddressItem)
+
+        let copyImageItem = NSMenuItem(title: copyImageTitle, action: #selector(self.copyImageAction(_:)), keyEquivalent: "")
+        copyImageItem.target = self
+        copyImageItem.representedObject = imageUrl
+        menu.addItem(copyImageItem)
+
+        return menu
+    }
+
+    @objc func copyImageAddressAction(_ sender: NSMenuItem) {
+        guard let imageUrl = self.imageURL(for: sender) else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(imageUrl.absoluteString, forType: .string)
+    }
+
+    @objc func copyImageAction(_ sender: NSMenuItem) {
+        guard let imageUrl = self.imageURL(for: sender) else { return }
+        self.handleCopyImage(url: imageUrl)
+    }
+}
+
+private extension DeskGPTViewController {
+    func imageURL(for sender: NSMenuItem) -> URL? {
+        return sender.representedObject as? URL
     }
 }
