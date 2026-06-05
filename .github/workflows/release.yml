@@ -85,8 +85,11 @@ jobs:
           fi
 
           cp src/Info.plist "$APP_DIR/Contents/Info.plist"
+          cp assets/sawshark_favicon.png "$RESOURCES_DIR/sawshark_favicon.png"
+          cp assets/github_favicon.png "$RESOURCES_DIR/github_favicon.png"
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP_DIR/Contents/Info.plist"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" "$APP_DIR/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :DeskGPTReleaseDate $(date -u +%Y-%m-%d)" "$APP_DIR/Contents/Info.plist"
 
           SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
           echo "Building DeskGPT.app..."

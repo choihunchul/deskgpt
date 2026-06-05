@@ -495,16 +495,28 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
     
     // MARK: - WKUIDelegate: File Upload and New Window Handling
     func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
-        let openPanel = NSOpenPanel()
-        openPanel.allowsMultipleSelection = parameters.allowsMultipleSelection
-        openPanel.canChooseDirectories = false
-        openPanel.canChooseFiles = true
-        
-        openPanel.begin { response in
-            if response == .OK {
-                completionHandler(openPanel.urls)
+        DispatchQueue.main.async {
+            let openPanel = NSOpenPanel()
+            openPanel.allowsMultipleSelection = parameters.allowsMultipleSelection
+            openPanel.canChooseDirectories = false
+            openPanel.canChooseFiles = true
+            openPanel.resolvesAliases = true
+
+            NSApp.activate(ignoringOtherApps: true)
+
+            let handleResponse: (NSApplication.ModalResponse) -> Void = { response in
+                if response == .OK {
+                    completionHandler(openPanel.urls)
+                } else {
+                    completionHandler(nil)
+                }
+            }
+
+            if let hostWindow = webView.window ?? self.view.window ?? NSApp.keyWindow {
+                hostWindow.makeKeyAndOrderFront(nil)
+                openPanel.beginSheetModal(for: hostWindow, completionHandler: handleResponse)
             } else {
-                completionHandler(nil)
+                handleResponse(openPanel.runModal())
             }
         }
     }

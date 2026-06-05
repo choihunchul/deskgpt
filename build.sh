@@ -38,6 +38,9 @@ fi
 
 # 2. Copy metadata settings plist file
 cp src/Info.plist build/DeskGPT.app/Contents/Info.plist
+cp assets/sawshark_favicon.png build/DeskGPT.app/Contents/Resources/sawshark_favicon.png
+cp assets/github_favicon.png build/DeskGPT.app/Contents/Resources/github_favicon.png
+plutil -replace DeskGPTReleaseDate -string "$(date +%Y-%m-%d)" build/DeskGPT.app/Contents/Info.plist
 plutil -replace CFBundleVersion -string "$(date +%Y%m%d%H%M%S)" build/DeskGPT.app/Contents/Info.plist
 
 # 3. Swift high-performance compile & pack

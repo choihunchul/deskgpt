@@ -111,10 +111,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UpdateMana
         
         // 1. DeskGPT App Menu
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "About DeskGPT", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        let aboutItem = appMenu.addItem(withTitle: "About DeskGPT", action: #selector(showAboutPanel(_:)), keyEquivalent: "")
+        aboutItem.target = self
         appMenu.addItem(NSMenuItem.separator())
-        let preferencesItem = appMenu.addItem(withTitle: "Preferences...", action: #selector(showPreferencesAction), keyEquivalent: ",")
+        let preferencesItem = appMenu.addItem(withTitle: "Preferences...", action: #selector(showPreferencesAction(_:)), keyEquivalent: ",")
         preferencesItem.target = self
+        preferencesItem.isEnabled = true
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Hide DeskGPT", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h").keyEquivalentModifierMask = [.command, .option]
@@ -190,7 +192,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UpdateMana
     @objc func zoomInAction() { viewController?.zoomIn() }
     @objc func zoomOutAction() { viewController?.zoomOut() }
     @objc func zoomResetAction() { viewController?.resetZoom() }
-    @objc func showPreferencesAction() {
+    @objc func showAboutPanel(_ sender: Any?) {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let shortVersion = info["CFBundleShortVersionString"] as? String ?? "1.0"
+        let buildVersion = info["CFBundleVersion"] as? String ?? "1"
+        let releaseDate = info["DeskGPTReleaseDate"] as? String ?? "-"
+        let credits = NSMutableAttributedString()
+        credits.append(centeredString("DeskGPT is a tiny macOS app that does one thing: open chatgpt.com in a native WebKit webview"))
+        credits.append(NSAttributedString(string: "\n\n"))
+        credits.append(iconLine(resourceName: "sawshark_favicon", text: "choihunchul"))
+        credits.append(NSAttributedString(string: "\n"))
+        credits.append(iconLine(resourceName: "github_favicon", text: "hunchulchoi/deskgpt", link: URL(string: "https://github.com/hunchulchoi/deskgpt")))
+
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationVersion: "버전 \(shortVersion)(\(buildVersion)) · \(releaseDate)",
+            .credits: credits
+        ])
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc func showPreferencesAction(_ sender: Any?) {
         if preferencesWindowController == nil {
             preferencesWindowController = PreferencesWindowController()
         }
@@ -239,6 +260,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UpdateMana
         refreshButton.widthAnchor.constraint(equalToConstant: 36).isActive = true
         refreshButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
 
+        let checkUpdatesButton = NSButton(title: "업데이트 확인", target: self, action: #selector(checkForUpdatesAction))
+        checkUpdatesButton.bezelStyle = .rounded
+        checkUpdatesButton.isBordered = true
+        checkUpdatesButton.isTransparent = false
+        checkUpdatesButton.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
+        checkUpdatesButton.contentTintColor = .secondaryLabelColor
+        checkUpdatesButton.translatesAutoresizingMaskIntoConstraints = false
+        checkUpdatesButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        checkUpdatesButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
+
         let updateButton = NSButton(title: "Update to Restart", target: self, action: #selector(installUpdateAction))
         updateButton.bezelStyle = .rounded
         updateButton.isBordered = true
@@ -255,13 +286,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UpdateMana
         updateButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
         updateButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 148).isActive = true
 
-        let stack = NSStackView(views: [refreshButton, updateButton])
+        let stack = NSStackView(views: [refreshButton, checkUpdatesButton, updateButton])
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = 8
 
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 210, height: 30))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 30))
         container.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -302,7 +333,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UpdateMana
     func updateManager(_ manager: UpdateManager, didPrepareUpdate version: String, downloadURL: URL) {
         viewController?.showUpdateAvailable(version: version, downloadPath: downloadURL)
         updateButton?.isHidden = false
-        titlebarButtonContainer?.frame.size.width = 370
+        titlebarButtonContainer?.frame.size.width = 470
     }
 
     private func activateMainWindow() {
@@ -339,6 +370,76 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UpdateMana
 
     private func saveMainWindowFrame(_ window: NSWindow) {
         UserDefaults.standard.set(NSStringFromRect(window.frame), forKey: mainWindowFrameKey)
+    }
+
+    private func centeredString(_ text: String) -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        return NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .paragraphStyle: paragraph
+        ])
+    }
+
+    private func iconLine(resourceName: String, text: String, link: URL? = nil) -> NSAttributedString {
+        let line = NSMutableAttributedString()
+
+        if let imageURL = Bundle.main.url(forResource: resourceName, withExtension: "png"),
+           let image = NSImage(contentsOf: imageURL) {
+            let iconSize = NSSize(width: 14, height: 14)
+            let displayImage: NSImage
+            if resourceName == "github_favicon" {
+                displayImage = decoratedGitHubIcon(from: image, iconSize: iconSize)
+            } else {
+                image.size = iconSize
+                displayImage = image
+            }
+
+            let attachment = NSTextAttachment()
+            attachment.image = displayImage
+            attachment.bounds = NSRect(x: 0, y: -2, width: displayImage.size.width, height: displayImage.size.height)
+            line.append(NSAttributedString(attachment: attachment))
+            line.append(NSAttributedString(string: " "))
+        }
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+
+        var attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: paragraph
+        ]
+        if let link {
+            attributes[.link] = link
+            attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+        }
+
+        line.append(NSAttributedString(string: text, attributes: attributes))
+        return line
+    }
+
+    private func decoratedGitHubIcon(from image: NSImage, iconSize: NSSize) -> NSImage {
+        let canvasSize = NSSize(width: 18, height: 18)
+        let decorated = NSImage(size: canvasSize)
+
+        decorated.lockFocus()
+        let badgeRect = NSRect(origin: .zero, size: canvasSize)
+        let badgePath = NSBezierPath(roundedRect: badgeRect, xRadius: 5, yRadius: 5)
+        NSColor(white: 0.96, alpha: 1.0).setFill()
+        badgePath.fill()
+
+        let iconRect = NSRect(
+            x: (canvasSize.width - iconSize.width) / 2,
+            y: (canvasSize.height - iconSize.height) / 2,
+            width: iconSize.width,
+            height: iconSize.height
+        )
+        image.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+        decorated.unlockFocus()
+
+        return decorated
     }
 
     private func installImageContextMenuMonitor() {
