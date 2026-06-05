@@ -1,0 +1,64 @@
+name: CodeQL
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: "17 3 * * 0"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - swift
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: manual
+
+      - name: Build DeskGPT for CodeQL
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SWIFT_MODULE_CACHE_DIR="$(mktemp -d "$RUNNER_TEMP/deskgpt-codeql-module-cache.XXXXXX")"
+          trap 'rm -rf "$SWIFT_MODULE_CACHE_DIR"' EXIT
+
+          SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
+          swiftc \
+            -sdk "$SDK_PATH" \
+            -module-cache-path "$SWIFT_MODULE_CACHE_DIR" \
+            src/DeskGPTViewController.swift \
+            src/DeskGPTPDFViewController.swift \
+            src/UpdateInstaller.swift \
+            src/UpdateManager.swift \
+            src/PreferencesWindowController.swift \
+            src/AppDelegate.swift \
+            src/main.swift \
+            -o "$RUNNER_TEMP/DeskGPT-codeql-check" \
+            -framework Cocoa -framework WebKit -framework PDFKit
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
