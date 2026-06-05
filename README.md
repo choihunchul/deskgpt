@@ -10,13 +10,13 @@
   <img src="assets/deskgpt_screen_shot.png" alt="DeskGPT screenshot" />
 </p>
 
-**DeskGPT** is a very small macOS program that simply opens `chatgpt.com` inside a native WebKit webview.
+**DeskGPT** is a tiny macOS app that does one thing: open `chatgpt.com` in a native WebKit webview.
 
-It does not collect your data. The only network calls it makes outside ChatGPT itself are to **GitHub Releases** so it can check whether a new version is available.
+It does not collect your data. The only network calls it makes outside ChatGPT itself are to **GitHub Releases** for update checks.
 
 I made it because opening Safari and going to `chatgpt.com` over and over again was annoying.
 
-This app intentionally does almost nothing beyond wrapping ChatGPT in a native window, keeping your session alive, and making a few browser-like actions feel better on macOS.
+That is basically the whole app. It intentionally does very little beyond wrapping ChatGPT in a native window, keeping your session alive, and making a few browser-like actions feel better on macOS.
 
 ---
 
