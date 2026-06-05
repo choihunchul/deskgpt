@@ -2,6 +2,8 @@ name: Release DeskGPT
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
@@ -24,9 +26,17 @@ jobs:
           set -euo pipefail
 
           APP_NAME="DeskGPT"
-          VERSION="${GITHUB_REF_NAME#v}"
-          if [[ -z "$VERSION" || "$VERSION" == "$GITHUB_REF_NAME" ]]; then
+          RELEASE_MESSAGE="${GITHUB_EVENT_HEAD_COMMIT_MESSAGE:-}"
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+          elif [[ "$RELEASE_MESSAGE" == release:* ]]; then
+            VERSION="${RELEASE_MESSAGE#release:}"
+            VERSION="${VERSION# }"
+            RELEASE_TAG="v${VERSION}"
+          else
             VERSION="${GITHUB_SHA::7}"
+            RELEASE_TAG="desk-gpt-${VERSION}"
           fi
 
           BUILD_DIR="$RUNNER_TEMP/deskgpt-build"
@@ -133,19 +143,20 @@ jobs:
               delay 1
             end tell
           end tell
-APPLESCRIPT
+          APPLESCRIPT
 
           hdiutil detach "$DMG_MOUNT_DIR"
           hdiutil convert "$DMG_RW_PATH" -format UDZO -ov -o "$DMG_PATH"
 
           echo "dmg_path=$DMG_PATH" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || startsWith(github.event.head_commit.message, 'release:')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ steps.build.outputs.release_tag }}
           name: DeskGPT ${{ steps.build.outputs.version }}
           files: ${{ steps.build.outputs.dmg_path }}
           generate_release_notes: true
