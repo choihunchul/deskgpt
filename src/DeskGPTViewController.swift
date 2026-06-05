@@ -91,6 +91,13 @@ private extension NSView {
 class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, DeskGPTMenuDelegate, NSMenuDelegate {
     var webView: WKWebView!
     var lastContextMenuImageUrl: URL?
+    private let chatGPTHomeURL = URL(string: "https://chatgpt.com")!
+    private var loadingOverlayView: NSVisualEffectView?
+    private var loadingSpinner: NSProgressIndicator?
+    private var loadingLabel: NSTextField?
+    private var initialLoadRetryWorkItem: DispatchWorkItem?
+    private var initialLoadRetryCount = 0
+    private let maximumInitialLoadRetries = 6
     private var pendingExternalPrompt: String?
     private var pendingExternalPromptAttempts: Int = 0
     private var externalPromptRetryTimer: DispatchWorkItem?
@@ -319,11 +326,120 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
     
     override func viewDidLoad() {
         super.viewDidLoad()
-        if let url = URL(string: "https://chatgpt.com") {
-            let request = URLRequest(url: url)
-            webView.load(request)
-        }
+        loadChatGPTHomePage()
         startRaycastInboxPolling()
+    }
+
+    private func loadChatGPTHomePage() {
+        initialLoadRetryWorkItem?.cancel()
+        let request = URLRequest(url: chatGPTHomeURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+        showLoadingOverlay(message: "ChatGPT를 불러오는 중...")
+        webView.load(request)
+    }
+
+    private func scheduleInitialLoadRetry(after delay: TimeInterval) {
+        initialLoadRetryWorkItem?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.loadChatGPTHomePage()
+        }
+
+        initialLoadRetryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func showLoadingOverlay(message: String) {
+        DispatchQueue.main.async {
+            guard let hostView = self.webView else { return }
+
+            if self.loadingOverlayView == nil {
+                let container = NSVisualEffectView()
+                container.translatesAutoresizingMaskIntoConstraints = false
+                container.wantsLayer = true
+                container.material = .hudWindow
+                container.blendingMode = .withinWindow
+                container.state = .active
+                container.layer?.cornerRadius = 18
+                container.layer?.masksToBounds = true
+
+                let spinner = NSProgressIndicator()
+                spinner.translatesAutoresizingMaskIntoConstraints = false
+                spinner.style = .spinning
+                spinner.controlSize = .large
+                spinner.startAnimation(nil)
+
+                let label = NSTextField(labelWithString: message)
+                label.translatesAutoresizingMaskIntoConstraints = false
+                label.alignment = .center
+                label.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+                label.textColor = .white
+                label.maximumNumberOfLines = 2
+                label.lineBreakMode = .byWordWrapping
+
+                let stack = NSStackView(views: [spinner, label])
+                stack.translatesAutoresizingMaskIntoConstraints = false
+                stack.orientation = .vertical
+                stack.alignment = .centerX
+                stack.spacing = 12
+
+                container.addSubview(stack)
+                hostView.addSubview(container, positioned: .above, relativeTo: nil)
+
+                NSLayoutConstraint.activate([
+                    container.centerXAnchor.constraint(equalTo: hostView.centerXAnchor),
+                    container.centerYAnchor.constraint(equalTo: hostView.centerYAnchor),
+                    container.widthAnchor.constraint(greaterThanOrEqualToConstant: 260),
+                    container.widthAnchor.constraint(lessThanOrEqualToConstant: 380),
+                    stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 22),
+                    stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -22),
+                    stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 24),
+                    stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -24)
+                ])
+
+                self.loadingOverlayView = container
+                self.loadingSpinner = spinner
+                self.loadingLabel = label
+            }
+
+            self.loadingLabel?.stringValue = message
+            self.loadingSpinner?.startAnimation(nil)
+            self.loadingOverlayView?.isHidden = false
+            self.loadingOverlayView?.alphaValue = 1.0
+        }
+    }
+
+    private func hideLoadingOverlay() {
+        DispatchQueue.main.async {
+            self.loadingOverlayView?.isHidden = true
+            self.loadingOverlayView?.alphaValue = 0.0
+            self.loadingSpinner?.stopAnimation(nil)
+        }
+    }
+
+    private func isRecoverableStartupError(_ error: Error?) -> Bool {
+        guard let nsError = error as NSError? else { return true }
+
+        if nsError.domain == NSURLErrorDomain {
+            switch nsError.code {
+            case NSURLErrorNotConnectedToInternet,
+                 NSURLErrorNetworkConnectionLost,
+                 NSURLErrorTimedOut,
+                 NSURLErrorCannotFindHost,
+                 NSURLErrorCannotConnectToHost,
+                 NSURLErrorDNSLookupFailed,
+                 NSURLErrorInternationalRoamingOff,
+                 NSURLErrorDataNotAllowed:
+                return true
+            default:
+                return false
+            }
+        }
+
+        if nsError.domain == WKError.errorDomain, nsError.code == WKError.webContentProcessTerminated.rawValue {
+            return true
+        }
+
+        return false
     }
 
     func handleIncomingURL(_ url: URL) {
@@ -534,12 +650,35 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
     }
     
     func reloadPage() {
+        initialLoadRetryWorkItem?.cancel()
+        initialLoadRetryCount = 0
         webView.reload()
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        initialLoadRetryWorkItem?.cancel()
+        initialLoadRetryWorkItem = nil
+        initialLoadRetryCount = 0
+        hideLoadingOverlay()
         attemptToSendPendingExternalPrompt()
         scheduleComposerFocusRecovery(after: 0.25)
+    }
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        showLoadingOverlay(message: "ChatGPT를 불러오는 중...")
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        handleInitialLoadFailure(error)
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        handleInitialLoadFailure(error)
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        showLoadingOverlay(message: "세션을 복구하는 중...")
+        webView.reload()
     }
     
     func goBack() {
@@ -1232,6 +1371,24 @@ extension DeskGPTViewController: WKScriptMessageHandler {
         }
         timer.resume()
         externalPromptPollTimer = timer
+    }
+
+    private func handleInitialLoadFailure(_ error: Error) {
+        guard isRecoverableStartupError(error) else {
+            hideLoadingOverlay()
+            showErrorAlert(message: "초기 화면을 불러오지 못했습니다", info: error.localizedDescription)
+            return
+        }
+
+        guard initialLoadRetryCount < maximumInitialLoadRetries else {
+            showLoadingOverlay(message: "네트워크가 준비되면 자동으로 다시 시도합니다.\n필요하면 Cmd+R로 새로고침해 주세요.")
+            return
+        }
+
+        initialLoadRetryCount += 1
+        let delay = min(10.0, pow(1.6, Double(initialLoadRetryCount)))
+        showLoadingOverlay(message: "연결을 다시 시도하는 중... (\(initialLoadRetryCount)/\(maximumInitialLoadRetries))")
+        scheduleInitialLoadRetry(after: delay)
     }
 
     func makeImageContextMenu(imageUrl: URL) -> NSMenu {

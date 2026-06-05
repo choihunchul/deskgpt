@@ -8,7 +8,7 @@ mkdir -p build/DeskGPT.app/Contents/Resources
 
 # 1. Automate macOS ICNS App Icon bundle generation from flat high-res PNG
 echo "🎨 플랫 앱 아이콘 생성 중..."
-ICON_SRC="/Users/hunchulchoi/.gemini/antigravity/brain/46601610-fd48-492e-bdeb-86cf24510bea/deskgpt_flat_icon_1780031119679.png"
+ICON_SRC=".github/assets/icon.png"
 ICONSET_DIR=$(mktemp -d /private/tmp/deskgpt-icon.XXXXXX.iconset)
 NORMALIZED_DIR=$(mktemp -d /private/tmp/deskgpt-icon-src.XXXXXX)
 SWIFT_MODULE_CACHE_DIR=$(mktemp -d /private/tmp/deskgpt-swift-module-cache.XXXXXX)

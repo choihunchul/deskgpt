@@ -4,6 +4,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var window: NSWindow?
     var viewController: DeskGPTViewController?
     private var imageContextMenuMonitor: Any?
+    private var refreshAccessoryViewController: NSTitlebarAccessoryViewController?
     private let mainWindowFrameKey = "DeskGPTMainWindowFrame"
     
     var pdfWindow: NSWindow?
@@ -35,6 +36,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Bring the window and application strictly to the foreground
         activateMainWindow()
         print("🚀 AppDelegate: Direct NSWindow created, ordered front, and app activated...")
+        installTitlebarRefreshButton(on: win)
 
         setupMenu()
         print("🚀 AppDelegate: setupMenu finished...")
@@ -193,6 +195,34 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     
     @objc func resetSessionAction() { viewController?.resetSession() }
+
+    private func installTitlebarRefreshButton(on window: NSWindow) {
+        let button = NSButton(title: "", target: self, action: #selector(reloadAction))
+        button.bezelStyle = .texturedRounded
+        button.isBordered = false
+        button.isTransparent = false
+        button.contentTintColor = .secondaryLabelColor
+        button.toolTip = "새로고침"
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "새로고침")
+        button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
+        button.imagePosition = .imageOnly
+        button.widthAnchor.constraint(equalToConstant: 36).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 28).isActive = true
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 42, height: 30))
+        container.addSubview(button)
+        NSLayoutConstraint.activate([
+            button.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            button.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+        ])
+
+        let accessory = NSTitlebarAccessoryViewController()
+        accessory.view = container
+        accessory.layoutAttribute = .left
+        refreshAccessoryViewController = accessory
+        window.addTitlebarAccessoryViewController(accessory)
+    }
 
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
