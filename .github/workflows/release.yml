@@ -18,6 +18,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build app bundle
+        id: build
         shell: bash
         run: |
           set -euo pipefail
@@ -137,14 +138,14 @@ APPLESCRIPT
           hdiutil detach "$DMG_MOUNT_DIR"
           hdiutil convert "$DMG_RW_PATH" -format UDZO -ov -o "$DMG_PATH"
 
-          echo "APP_DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
-          echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "dmg_path=$DMG_PATH" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: DeskGPT ${{ env.APP_VERSION }}
-          files: ${{ env.APP_DMG_PATH }}
+          name: DeskGPT ${{ steps.build.outputs.version }}
+          files: ${{ steps.build.outputs.dmg_path }}
           generate_release_notes: true
