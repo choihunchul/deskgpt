@@ -22,11 +22,13 @@ jobs:
       - name: Build app bundle
         id: build
         shell: bash
+        env:
+          RELEASE_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           set -euo pipefail
 
           APP_NAME="DeskGPT"
-          RELEASE_MESSAGE="${GITHUB_EVENT_HEAD_COMMIT_MESSAGE:-}"
+          RELEASE_MESSAGE="${RELEASE_MESSAGE:-}"
           if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
             RELEASE_TAG="${GITHUB_REF_NAME}"
