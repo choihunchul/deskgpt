@@ -48,12 +48,12 @@ jobs:
       cask-name: "deskgpt"
       name: "DeskGPT"
       desc: "Tiny native macOS wrapper for ChatGPT"
-      homepage: "https://github.com/hunchulchoi/deskgpt"
+      homepage: "https://github.com/choihunchul/deskgpt"
       app-name: "DeskGPT.app"
       asset-name: "DeskGPT-{version}.dmg"
       tag: ${{ needs.resolve-tag.outputs.tag }}
       verify-tag: true
       zap-trash: "~/Library/Preferences/com.myside.DeskGPT.plist ~/Library/Application?Support/DeskGPT"
-      release-repo: "hunchulchoi/deskgpt"
+      release-repo: "choihunchul/deskgpt"
     secrets:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
