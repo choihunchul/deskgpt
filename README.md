@@ -61,6 +61,18 @@ That is basically the whole app. It intentionally does very little beyond wrappi
 
 ## 🛠️ Build & Installation (One-Touch Package)
 
+### Homebrew
+
+```bash
+brew install --cask choihunchul/tap/deskgpt
+```
+
+The Homebrew cask is published from GitHub Releases via `choihunchul/github--actions`.
+Maintainers need a `HOMEBREW_TAP_TOKEN` repository secret with write access to
+`choihunchul/homebrew-tap`.
+
+### Local Build
+
 If you have Xcode Command Line Tools installed (which includes the standard `swiftc` compiler), you can compile and package the application natively in seconds:
 
 1. **Navigate to the Repository**:
