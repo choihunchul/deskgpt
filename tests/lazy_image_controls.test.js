@@ -22,3 +22,10 @@ assert(
   source.includes('event.altKey') && source.includes('directSaveImage.postMessage'),
   'DeskGPT should keep direct image saving via Option-click without adding DOM controls'
 );
+
+assert(
+  source.includes('content-visibility: auto') &&
+    source.includes('contain-intrinsic-size') &&
+    source.includes('conversation-turn'),
+  'DeskGPT should apply offscreen conversation turn containment to reduce long-chat layout work'
+);

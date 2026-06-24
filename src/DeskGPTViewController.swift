@@ -130,6 +130,27 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
         
         let jsSource = """
         (function() {
+            function installLongChatContainmentStyle() {
+                if (document.getElementById('deskgpt-long-chat-containment')) {
+                    return;
+                }
+
+                var style = document.createElement('style');
+                style.id = 'deskgpt-long-chat-containment';
+                style.textContent = [
+                    'article[data-testid^="conversation-turn-"],',
+                    '[data-testid^="conversation-turn-"],',
+                    '[data-message-author-role] {',
+                    '  content-visibility: auto;',
+                    '  contain-intrinsic-size: auto 480px;',
+                    '}'
+                ].join('\\n');
+
+                (document.head || document.documentElement).appendChild(style);
+            }
+
+            installLongChatContainmentStyle();
+
             function resolveImageAtPoint(event) {
                 var elements = document.elementsFromPoint(event.clientX, event.clientY);
                 var imgSrc = "";
