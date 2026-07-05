@@ -175,6 +175,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UpdateMana
         
         // 5. Help / Diagnostic Menu
         let helpMenu = NSMenu(title: "Help")
+        helpMenu.addItem(withTitle: "Web 렌더러 복구 (Recover Web Renderer)", action: #selector(recoverWebRendererAction), keyEquivalent: "")
+        helpMenu.addItem(NSMenuItem.separator())
         helpMenu.addItem(withTitle: "세션 초기화 및 재시작 (Reset Session & Restart)", action: #selector(resetSessionAction), keyEquivalent: "")
         
         let helpMenuItem = NSMenuItem()
@@ -231,6 +233,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UpdateMana
     }
     
     @objc func resetSessionAction() { viewController?.resetSession() }
+
+    @objc func recoverWebRendererAction() { viewController?.recoverWebRenderer() }
 
     @objc private func checkForUpdatesAction() {
         updateManager.checkForUpdatesNow(force: true)

@@ -110,6 +110,7 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
     private var toastDismissWorkItem: DispatchWorkItem?
     private weak var activeToastView: NSView?
     private var externalPromptPollTimer: DispatchSourceTimer?
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
     private let raycastInboxURL = URL(fileURLWithPath: "/private/tmp/deskgpt-raycast-inbox.txt")
     
     override func loadView() {
@@ -268,6 +269,11 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
         super.viewDidLoad()
         loadChatGPTHomePage()
         startRaycastInboxPolling()
+        startMemoryPressureRecovery()
+    }
+
+    deinit {
+        memoryPressureSource?.cancel()
     }
 
     private func loadChatGPTHomePage() {
@@ -607,6 +613,27 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
         webView.reload()
     }
 
+    func recoverWebRenderer(reason: String = "manual") {
+        initialLoadRetryWorkItem?.cancel()
+        initialLoadRetryCount = 0
+        showLoadingOverlay(message: "Web 렌더러를 복구하는 중...")
+        print("🧯 Recovering Web renderer: \(reason)")
+        webView.reload()
+    }
+
+    private func startMemoryPressureRecovery() {
+        guard memoryPressureSource == nil else { return }
+        let source = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.warning, .critical],
+            queue: DispatchQueue.main
+        )
+        source.setEventHandler { [weak self] in
+            self?.recoverWebRenderer(reason: "memory-pressure")
+        }
+        source.resume()
+        memoryPressureSource = source
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         initialLoadRetryWorkItem?.cancel()
         initialLoadRetryWorkItem = nil
@@ -629,8 +656,7 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        showLoadingOverlay(message: "세션을 복구하는 중...")
-        webView.reload()
+        recoverWebRenderer(reason: "web-content-terminated")
     }
     
     func goBack() {
