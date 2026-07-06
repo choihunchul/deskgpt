@@ -15,8 +15,8 @@ assert(
 
 assert(
   viewController.includes('DispatchSource.makeMemoryPressureSource') &&
-    viewController.includes('recoverWebRenderer(reason: "memory-pressure")'),
-  'DeskGPT should auto-recover the WebKit renderer when macOS reports memory pressure'
+    viewController.includes('checkWebRendererMemoryUsage(reasonPrefix: "memory-pressure")'),
+  'DeskGPT should check renderer memory safely when macOS reports memory pressure'
 );
 
 assert(
@@ -34,6 +34,28 @@ assert(
     viewController.includes('_webProcessIdentifier') &&
     viewController.includes('proc_pidinfo'),
   'DeskGPT should run a lightweight renderer RSS watchdog without shelling out to ps'
+);
+
+assert(
+  viewController.includes('webRendererRecoveryCooldownSeconds: TimeInterval = 15 * 60') &&
+    viewController.includes('lastWebRendererRecoveryAt') &&
+    viewController.includes('lastWebRendererRecoveryRSSMB') &&
+    viewController.includes('shouldDelayAutomaticWebRendererRecovery'),
+  'DeskGPT should throttle automatic renderer recovery to prevent reload loops when RSS does not drop'
+);
+
+assert(
+  viewController.includes('updateWindowTitle(webRendererRSSMB: rssMB)') &&
+    viewController.includes('DeskGPT \\(shortVersion)') &&
+    viewController.includes('Web \\(rssMB)MB'),
+  'DeskGPT should show the app version and current Web renderer memory in the title bar'
+);
+
+assert(
+  !viewController.includes('force: true') &&
+    viewController.includes('recoverWebRendererIfSafe(reason: "\\(reasonPrefix)-hard-\\(rssMB)MB", rssMB: rssMB)') &&
+    viewController.includes('showToast(message: "Web 렌더러 메모리 높음: \\(rssMB)MB")'),
+  'DeskGPT watchdog should never force reload while the user may be scrolling or editing'
 );
 
 assert(

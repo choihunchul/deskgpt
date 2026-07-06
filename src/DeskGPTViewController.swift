@@ -113,6 +113,9 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
     private var externalPromptPollTimer: DispatchSourceTimer?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var webRendererWatchdogTimer: DispatchSourceTimer?
+    private var lastWebRendererRecoveryAt: Date?
+    private var lastWebRendererRecoveryRSSMB: Int?
+    private let webRendererRecoveryCooldownSeconds: TimeInterval = 15 * 60
     private let webRendererWarningThresholdMB = 500
     private let webRendererAutoRecoverThresholdMB = 800
     private let webRendererHardRecoverThresholdMB = 1_000
@@ -628,6 +631,12 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
         webView.reload()
     }
 
+    private func recoverWebRenderer(reason: String, rssMB: Int) {
+        lastWebRendererRecoveryAt = Date()
+        lastWebRendererRecoveryRSSMB = rssMB
+        recoverWebRenderer(reason: reason)
+    }
+
     private func startMemoryPressureRecovery() {
         guard memoryPressureSource == nil else { return }
         let source = DispatchSource.makeMemoryPressureSource(
@@ -635,7 +644,7 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
             queue: DispatchQueue.main
         )
         source.setEventHandler { [weak self] in
-            self?.recoverWebRenderer(reason: "memory-pressure")
+            self?.checkWebRendererMemoryUsage(reasonPrefix: "memory-pressure")
         }
         source.resume()
         memoryPressureSource = source
@@ -646,27 +655,34 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
         timer.schedule(deadline: .now() + 60, repeating: 60)
         timer.setEventHandler { [weak self] in
-            self?.checkWebRendererMemoryUsage()
+            self?.checkWebRendererMemoryUsage(reasonPrefix: "rss")
         }
         timer.resume()
         webRendererWatchdogTimer = timer
     }
 
-    private func checkWebRendererMemoryUsage() {
+    private func checkWebRendererMemoryUsage(reasonPrefix: String) {
         guard NSApp.isActive, view.window?.isVisible == true else { return }
         guard let pid = currentWebContentProcessIdentifier(),
               let rssMB = residentMemoryMegabytes(for: pid) else { return }
 
+        updateWindowTitle(webRendererRSSMB: rssMB)
+
         if rssMB >= webRendererHardRecoverThresholdMB {
-            recoverWebRendererIfSafe(reason: "rss-hard-\(rssMB)MB", rssMB: rssMB, force: true)
+            recoverWebRendererIfSafe(reason: "\(reasonPrefix)-hard-\(rssMB)MB", rssMB: rssMB)
         } else if rssMB >= webRendererAutoRecoverThresholdMB {
-            recoverWebRendererIfSafe(reason: "rss-auto-\(rssMB)MB", rssMB: rssMB, force: false)
+            recoverWebRendererIfSafe(reason: "\(reasonPrefix)-auto-\(rssMB)MB", rssMB: rssMB)
         } else if rssMB >= webRendererWarningThresholdMB {
             print("⚠️ Web renderer RSS warning: \(rssMB)MB")
         }
     }
 
-    private func recoverWebRendererIfSafe(reason: String, rssMB: Int, force: Bool) {
+    private func recoverWebRendererIfSafe(reason: String, rssMB: Int) {
+        if shouldDelayAutomaticWebRendererRecovery(rssMB: rssMB) {
+            showToast(message: "Web 렌더러 메모리 높음: \(rssMB)MB")
+            return
+        }
+
         let js = """
         (function() {
             var el = document.querySelector('#prompt-textarea') || document.querySelector('textarea');
@@ -679,13 +695,36 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
         webView.evaluateJavaScript(js) { [weak self] result, error in
             guard let self = self else { return }
             let hasDraft = (result as? Bool) ?? false
-            if !hasDraft || force || error != nil {
-                self.recoverWebRenderer(reason: reason)
+            if !hasDraft || error != nil {
+                self.recoverWebRenderer(reason: reason, rssMB: rssMB)
             } else {
                 self.showToast(message: "Web 렌더러 메모리 높음: \(rssMB)MB")
                 print("⚠️ Skipping Web renderer recovery because composer has draft text: \(rssMB)MB")
             }
         }
+    }
+
+    private func shouldDelayAutomaticWebRendererRecovery(rssMB: Int) -> Bool {
+        guard let lastRecoveryAt = lastWebRendererRecoveryAt else { return false }
+        let elapsed = Date().timeIntervalSince(lastRecoveryAt)
+        guard elapsed < webRendererRecoveryCooldownSeconds else { return false }
+
+        if let previousRSS = lastWebRendererRecoveryRSSMB, rssMB >= previousRSS - 100 {
+            print("⚠️ Delaying Web renderer recovery; RSS stayed high after reload: \(rssMB)MB")
+        }
+        return true
+    }
+
+    private func updateWindowTitle(webRendererRSSMB rssMB: Int?) {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let shortVersion = info["CFBundleShortVersionString"] as? String ?? "1.0"
+        let memoryText: String
+        if let rssMB {
+            memoryText = "Web \(rssMB)MB"
+        } else {
+            memoryText = "Web -"
+        }
+        view.window?.title = "DeskGPT \(shortVersion) · \(memoryText)"
     }
 
     private func currentWebContentProcessIdentifier() -> pid_t? {
@@ -712,6 +751,7 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
         initialLoadRetryWorkItem = nil
         initialLoadRetryCount = 0
         hideLoadingOverlay()
+        updateWindowTitle(webRendererRSSMB: nil)
         attemptToSendPendingExternalPrompt()
         scheduleComposerFocusRecovery(after: 0.25)
     }
