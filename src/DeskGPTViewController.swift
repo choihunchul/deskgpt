@@ -1,4 +1,5 @@
 import Cocoa
+import Darwin
 import ObjectiveC.runtime
 import WebKit
 
@@ -111,6 +112,10 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
     private weak var activeToastView: NSView?
     private var externalPromptPollTimer: DispatchSourceTimer?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
+    private var webRendererWatchdogTimer: DispatchSourceTimer?
+    private let webRendererWarningThresholdMB = 500
+    private let webRendererAutoRecoverThresholdMB = 800
+    private let webRendererHardRecoverThresholdMB = 1_000
     private let raycastInboxURL = URL(fileURLWithPath: "/private/tmp/deskgpt-raycast-inbox.txt")
     
     override func loadView() {
@@ -270,10 +275,12 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
         loadChatGPTHomePage()
         startRaycastInboxPolling()
         startMemoryPressureRecovery()
+        startWebRendererMemoryWatchdog()
     }
 
     deinit {
         memoryPressureSource?.cancel()
+        webRendererWatchdogTimer?.cancel()
     }
 
     private func loadChatGPTHomePage() {
@@ -632,6 +639,72 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
         }
         source.resume()
         memoryPressureSource = source
+    }
+
+    private func startWebRendererMemoryWatchdog() {
+        guard webRendererWatchdogTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
+        timer.schedule(deadline: .now() + 60, repeating: 60)
+        timer.setEventHandler { [weak self] in
+            self?.checkWebRendererMemoryUsage()
+        }
+        timer.resume()
+        webRendererWatchdogTimer = timer
+    }
+
+    private func checkWebRendererMemoryUsage() {
+        guard NSApp.isActive, view.window?.isVisible == true else { return }
+        guard let pid = currentWebContentProcessIdentifier(),
+              let rssMB = residentMemoryMegabytes(for: pid) else { return }
+
+        if rssMB >= webRendererHardRecoverThresholdMB {
+            recoverWebRendererIfSafe(reason: "rss-hard-\(rssMB)MB", rssMB: rssMB, force: true)
+        } else if rssMB >= webRendererAutoRecoverThresholdMB {
+            recoverWebRendererIfSafe(reason: "rss-auto-\(rssMB)MB", rssMB: rssMB, force: false)
+        } else if rssMB >= webRendererWarningThresholdMB {
+            print("⚠️ Web renderer RSS warning: \(rssMB)MB")
+        }
+    }
+
+    private func recoverWebRendererIfSafe(reason: String, rssMB: Int, force: Bool) {
+        let js = """
+        (function() {
+            var el = document.querySelector('#prompt-textarea') || document.querySelector('textarea');
+            if (!el) { return false; }
+            var text = (el.value || el.innerText || el.textContent || '').trim();
+            return text.length > 0;
+        })();
+        """
+
+        webView.evaluateJavaScript(js) { [weak self] result, error in
+            guard let self = self else { return }
+            let hasDraft = (result as? Bool) ?? false
+            if !hasDraft || force || error != nil {
+                self.recoverWebRenderer(reason: reason)
+            } else {
+                self.showToast(message: "Web 렌더러 메모리 높음: \(rssMB)MB")
+                print("⚠️ Skipping Web renderer recovery because composer has draft text: \(rssMB)MB")
+            }
+        }
+    }
+
+    private func currentWebContentProcessIdentifier() -> pid_t? {
+        let key = "_webProcessIdentifier"
+        guard webView.responds(to: NSSelectorFromString(key)),
+              let number = webView.value(forKey: key) as? NSNumber else { return nil }
+        let pid = pid_t(number.int32Value)
+        return pid > 0 ? pid : nil
+    }
+
+    private func residentMemoryMegabytes(for pid: pid_t) -> Int? {
+        var info = proc_taskinfo()
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: UInt8.self, capacity: MemoryLayout<proc_taskinfo>.size) { rawPointer in
+                proc_pidinfo(pid, PROC_PIDTASKINFO, 0, rawPointer, Int32(MemoryLayout<proc_taskinfo>.size))
+            }
+        }
+        guard result == Int32(MemoryLayout<proc_taskinfo>.size) else { return nil }
+        return Int(info.pti_resident_size / 1024 / 1024)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
