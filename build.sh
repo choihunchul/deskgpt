@@ -41,6 +41,10 @@ cp src/Info.plist build/DeskGPT.app/Contents/Info.plist
 cp assets/sawshark_favicon.png build/DeskGPT.app/Contents/Resources/sawshark_favicon.png
 cp assets/github_favicon.png build/DeskGPT.app/Contents/Resources/github_favicon.png
 plutil -replace DeskGPTReleaseDate -string "$(date +%Y-%m-%d)" build/DeskGPT.app/Contents/Info.plist
+APP_VERSION="$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')"
+if [ -n "$APP_VERSION" ]; then
+  plutil -replace CFBundleShortVersionString -string "$APP_VERSION" build/DeskGPT.app/Contents/Info.plist
+fi
 plutil -replace CFBundleVersion -string "$(date +%Y%m%d%H%M%S)" build/DeskGPT.app/Contents/Info.plist
 
 # 3. Swift high-performance compile & pack

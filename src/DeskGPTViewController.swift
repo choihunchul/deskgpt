@@ -113,6 +113,9 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
     private var externalPromptPollTimer: DispatchSourceTimer?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var webRendererWatchdogTimer: DispatchSourceTimer?
+    private var titlebarMemoryAccessory: NSTitlebarAccessoryViewController?
+    private var titlebarMemoryLabel: NSTextField?
+    private var isTerminatingWebContentForRecovery = false
     private var lastWebRendererRecoveryAt: Date?
     private var lastWebRendererRecoveryRSSMB: Int?
     private let webRendererRecoveryCooldownSeconds: TimeInterval = 15 * 60
@@ -279,6 +282,18 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
         startRaycastInboxPolling()
         startMemoryPressureRecovery()
         startWebRendererMemoryWatchdog()
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        updateWindowTitle(webRendererRSSMB: nil)
+        checkWebRendererMemoryUsage(reasonPrefix: "initial")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.checkWebRendererMemoryUsage(reasonPrefix: "initial")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            self?.checkWebRendererMemoryUsage(reasonPrefix: "initial")
+        }
     }
 
     deinit {
@@ -628,6 +643,12 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
         initialLoadRetryCount = 0
         showLoadingOverlay(message: "Web 렌더러를 복구하는 중...")
         print("🧯 Recovering Web renderer: \(reason)")
+
+        if let pid = currentWebContentProcessIdentifier(), kill(pid, SIGTERM) == 0 {
+            isTerminatingWebContentForRecovery = true
+            return
+        }
+
         webView.reload()
     }
 
@@ -653,7 +674,7 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
     private func startWebRendererMemoryWatchdog() {
         guard webRendererWatchdogTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
-        timer.schedule(deadline: .now() + 60, repeating: 60)
+        timer.schedule(deadline: .now() + 10, repeating: 60)
         timer.setEventHandler { [weak self] in
             self?.checkWebRendererMemoryUsage(reasonPrefix: "rss")
         }
@@ -664,7 +685,10 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
     private func checkWebRendererMemoryUsage(reasonPrefix: String) {
         guard NSApp.isActive, view.window?.isVisible == true else { return }
         guard let pid = currentWebContentProcessIdentifier(),
-              let rssMB = residentMemoryMegabytes(for: pid) else { return }
+              let rssMB = residentMemoryMegabytes(for: pid) else {
+            updateWindowTitle(webRendererRSSMB: nil)
+            return
+        }
 
         updateWindowTitle(webRendererRSSMB: rssMB)
 
@@ -716,22 +740,55 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
     }
 
     private func updateWindowTitle(webRendererRSSMB rssMB: Int?) {
+        installTitlebarMemoryLabelIfNeeded()
         let info = Bundle.main.infoDictionary ?? [:]
         let shortVersion = info["CFBundleShortVersionString"] as? String ?? "1.0"
         let memoryText: String
         if let rssMB {
             memoryText = "Web \(rssMB)MB"
+        } else if let appRSSMB = residentMemoryMegabytes(for: getpid()) {
+            memoryText = "App \(appRSSMB)MB"
         } else {
             memoryText = "Web -"
         }
-        view.window?.title = "DeskGPT \(shortVersion) · \(memoryText)"
+        let title = "DeskGPT \(shortVersion) · \(memoryText)"
+        titlebarMemoryLabel?.stringValue = title
+    }
+
+    private func installTitlebarMemoryLabelIfNeeded() {
+        guard titlebarMemoryAccessory == nil, let window = view.window else { return }
+
+        let label = NSTextField(labelWithString: "DeskGPT · Web -")
+        label.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        label.textColor = .secondaryLabelColor
+        label.alignment = .left
+        label.lineBreakMode = .byTruncatingMiddle
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 28))
+        container.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            label.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+        ])
+
+        let accessory = NSTitlebarAccessoryViewController()
+        accessory.view = container
+        accessory.layoutAttribute = .left
+        window.addTitlebarAccessoryViewController(accessory)
+        titlebarMemoryAccessory = accessory
+        titlebarMemoryLabel = label
     }
 
     private func currentWebContentProcessIdentifier() -> pid_t? {
-        let key = "_webProcessIdentifier"
-        guard webView.responds(to: NSSelectorFromString(key)),
-              let number = webView.value(forKey: key) as? NSNumber else { return nil }
-        let pid = pid_t(number.int32Value)
+        let selector = NSSelectorFromString("_webProcessIdentifier")
+        guard let method = class_getInstanceMethod(WKWebView.self, selector) else { return nil }
+
+        typealias WebProcessIdentifierFunction = @convention(c) (AnyObject, Selector) -> Int32
+        let implementation = method_getImplementation(method)
+        let function = unsafeBitCast(implementation, to: WebProcessIdentifierFunction.self)
+        let pid = pid_t(function(webView, selector))
         return pid > 0 ? pid : nil
     }
 
@@ -769,7 +826,9 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        recoverWebRenderer(reason: "web-content-terminated")
+        showLoadingOverlay(message: "Web 렌더러를 복구하는 중...")
+        isTerminatingWebContentForRecovery = false
+        webView.reload()
     }
     
     func goBack() {

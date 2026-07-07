@@ -5,6 +5,7 @@ const assert = require('assert');
 const root = path.resolve(__dirname, '..');
 const appDelegate = fs.readFileSync(path.join(root, 'src', 'AppDelegate.swift'), 'utf8');
 const viewController = fs.readFileSync(path.join(root, 'src', 'DeskGPTViewController.swift'), 'utf8');
+const buildScript = fs.readFileSync(path.join(root, 'build.sh'), 'utf8');
 
 assert(
   appDelegate.includes('복구 (Recover Web Renderer)') &&
@@ -49,6 +50,49 @@ assert(
     viewController.includes('DeskGPT \\(shortVersion)') &&
     viewController.includes('Web \\(rssMB)MB'),
   'DeskGPT should show the app version and current Web renderer memory in the title bar'
+);
+
+assert(
+  viewController.includes('titlebarMemoryLabel') &&
+    viewController.includes('NSTitlebarAccessoryViewController') &&
+    viewController.includes('accessory.layoutAttribute = .left') &&
+    viewController.includes('installTitlebarMemoryLabelIfNeeded()') &&
+    viewController.includes('titlebarMemoryLabel?.stringValue'),
+  'DeskGPT should render version and memory at the start of the titlebar'
+);
+
+assert(
+  viewController.includes('checkWebRendererMemoryUsage(reasonPrefix: "initial")') &&
+    viewController.includes('residentMemoryMegabytes(for: getpid())') &&
+    viewController.includes('"App \\(appRSSMB)MB"'),
+  'DeskGPT should show a memory value immediately at startup before the WebContent PID is available'
+);
+
+assert(
+  appDelegate.includes('win.titleVisibility = .hidden') &&
+    !viewController.includes('view.window?.title = title'),
+  'DeskGPT should hide the standard window title so the memory accessory is the only visible title'
+);
+
+assert(
+  viewController.includes('method_getImplementation') &&
+    viewController.includes('unsafeBitCast') &&
+    viewController.includes('_webProcessIdentifier'),
+  'DeskGPT should read the WebContent PID through the private WebKit selector before measuring RSS'
+);
+
+assert(
+  viewController.includes('isTerminatingWebContentForRecovery') &&
+    viewController.includes('kill(pid, SIGTERM)') &&
+    viewController.includes('webViewWebContentProcessDidTerminate') &&
+    viewController.includes('isTerminatingWebContentForRecovery = false'),
+  'DeskGPT recovery should terminate the WebContent process instead of only reloading the same renderer'
+);
+
+assert(
+  buildScript.includes('git describe --tags --abbrev=0') &&
+    buildScript.includes('CFBundleShortVersionString'),
+  'DeskGPT local builds should display the latest release tag version instead of the source plist default'
 );
 
 assert(

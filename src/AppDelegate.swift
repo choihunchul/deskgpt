@@ -28,6 +28,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UpdateMana
             defer: false
         )
         win.title = "DeskGPT"
+        win.titleVisibility = .hidden
         win.contentViewController = viewController
         win.delegate = self
         
