@@ -16,15 +16,18 @@ assert(
 
 assert(
   viewController.includes('DispatchSource.makeMemoryPressureSource') &&
-    viewController.includes('checkWebRendererMemoryUsage(reasonPrefix: "memory-pressure")'),
-  'DeskGPT should check renderer memory safely when macOS reports memory pressure'
+    viewController.includes('eventMask: [.normal, .warning, .critical]') &&
+    viewController.includes('isSystemMemoryPressureCritical'),
+  'DeskGPT should use macOS critical memory pressure as the automatic recovery gate'
 );
 
 assert(
   viewController.includes('webRendererWarningThresholdMB = 500') &&
-    viewController.includes('webRendererAutoRecoverThresholdMB = 800') &&
-    viewController.includes('webRendererHardRecoverThresholdMB = 1_000'),
-  'DeskGPT should use 500MB warning, 800MB auto, and 1GB hard renderer memory thresholds'
+    viewController.includes('webRendererEmergencyThresholdMB = 1_500') &&
+    viewController.includes('webRendererEmergencySampleCount = 3') &&
+    !viewController.includes('webRendererAutoRecoverThresholdMB') &&
+    !viewController.includes('webRendererHardRecoverThresholdMB'),
+  'DeskGPT should warn at 500MB and reserve automatic recovery for sustained 1.5GB emergencies'
 );
 
 assert(
@@ -38,11 +41,18 @@ assert(
 );
 
 assert(
-  viewController.includes('webRendererRecoveryCooldownSeconds: TimeInterval = 15 * 60') &&
-    viewController.includes('lastWebRendererRecoveryAt') &&
-    viewController.includes('lastWebRendererRecoveryRSSMB') &&
-    viewController.includes('shouldDelayAutomaticWebRendererRecovery'),
-  'DeskGPT should throttle automatic renderer recovery to prevent reload loops when RSS does not drop'
+  viewController.includes('consecutiveEmergencyMemorySamples') &&
+    viewController.includes('isSystemMemoryPressureCritical') &&
+    viewController.includes('!NSApp.isActive') &&
+    viewController.includes('consecutiveEmergencyMemorySamples >= webRendererEmergencySampleCount'),
+  'DeskGPT should recover only after sustained high memory while the app is inactive and macOS pressure is critical'
+);
+
+assert(
+  !viewController.includes('content-visibility: auto') &&
+    !viewController.includes('contain-intrinsic-size') &&
+    !viewController.includes('deskgpt-long-chat-containment'),
+  'DeskGPT should not inject containment CSS that causes long chats to redraw while scrolling'
 );
 
 assert(
@@ -97,9 +107,9 @@ assert(
 
 assert(
   !viewController.includes('force: true') &&
-    viewController.includes('recoverWebRendererIfSafe(reason: "\\(reasonPrefix)-hard-\\(rssMB)MB", rssMB: rssMB)') &&
+    viewController.includes('recoverWebRendererIfSafe(reason: "\\(reasonPrefix)-emergency-\\(rssMB)MB", rssMB: rssMB)') &&
     viewController.includes('showToast(message: "Web 렌더러 메모리 높음: \\(rssMB)MB")'),
-  'DeskGPT watchdog should never force reload while the user may be scrolling or editing'
+  'DeskGPT watchdog should never force reload while the app is active or the user has draft text'
 );
 
 assert(

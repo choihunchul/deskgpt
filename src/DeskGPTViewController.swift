@@ -116,12 +116,11 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
     private var titlebarMemoryAccessory: NSTitlebarAccessoryViewController?
     private var titlebarMemoryLabel: NSTextField?
     private var isTerminatingWebContentForRecovery = false
-    private var lastWebRendererRecoveryAt: Date?
-    private var lastWebRendererRecoveryRSSMB: Int?
-    private let webRendererRecoveryCooldownSeconds: TimeInterval = 15 * 60
+    private var isSystemMemoryPressureCritical = false
+    private var consecutiveEmergencyMemorySamples = 0
     private let webRendererWarningThresholdMB = 500
-    private let webRendererAutoRecoverThresholdMB = 800
-    private let webRendererHardRecoverThresholdMB = 1_000
+    private let webRendererEmergencyThresholdMB = 1_500
+    private let webRendererEmergencySampleCount = 3
     private let raycastInboxURL = URL(fileURLWithPath: "/private/tmp/deskgpt-raycast-inbox.txt")
     
     override func loadView() {
@@ -142,27 +141,6 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
         
         let jsSource = """
         (function() {
-            function installLongChatContainmentStyle() {
-                if (document.getElementById('deskgpt-long-chat-containment')) {
-                    return;
-                }
-
-                var style = document.createElement('style');
-                style.id = 'deskgpt-long-chat-containment';
-                style.textContent = [
-                    'article[data-testid^="conversation-turn-"],',
-                    '[data-testid^="conversation-turn-"],',
-                    '[data-message-author-role] {',
-                    '  content-visibility: auto;',
-                    '  contain-intrinsic-size: auto 480px;',
-                    '}'
-                ].join('\\n');
-
-                (document.head || document.documentElement).appendChild(style);
-            }
-
-            installLongChatContainmentStyle();
-
             function resolveImageAtPoint(event) {
                 var elements = document.elementsFromPoint(event.clientX, event.clientY);
                 var imgSrc = "";
@@ -652,20 +630,20 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
         webView.reload()
     }
 
-    private func recoverWebRenderer(reason: String, rssMB: Int) {
-        lastWebRendererRecoveryAt = Date()
-        lastWebRendererRecoveryRSSMB = rssMB
-        recoverWebRenderer(reason: reason)
-    }
-
     private func startMemoryPressureRecovery() {
         guard memoryPressureSource == nil else { return }
         let source = DispatchSource.makeMemoryPressureSource(
-            eventMask: [.warning, .critical],
+            eventMask: [.normal, .warning, .critical],
             queue: DispatchQueue.main
         )
         source.setEventHandler { [weak self] in
-            self?.checkWebRendererMemoryUsage(reasonPrefix: "memory-pressure")
+            guard let self else { return }
+            let event = self.memoryPressureSource?.data ?? []
+            self.isSystemMemoryPressureCritical = event.contains(.critical)
+            if event.contains(.normal) {
+                self.consecutiveEmergencyMemorySamples = 0
+            }
+            self.checkWebRendererMemoryUsage(reasonPrefix: "memory-pressure")
         }
         source.resume()
         memoryPressureSource = source
@@ -683,7 +661,7 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
     }
 
     private func checkWebRendererMemoryUsage(reasonPrefix: String) {
-        guard NSApp.isActive, view.window?.isVisible == true else { return }
+        guard view.window?.isVisible == true else { return }
         guard let pid = currentWebContentProcessIdentifier(),
               let rssMB = residentMemoryMegabytes(for: pid) else {
             updateWindowTitle(webRendererRSSMB: nil)
@@ -692,21 +670,24 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
 
         updateWindowTitle(webRendererRSSMB: rssMB)
 
-        if rssMB >= webRendererHardRecoverThresholdMB {
-            recoverWebRendererIfSafe(reason: "\(reasonPrefix)-hard-\(rssMB)MB", rssMB: rssMB)
-        } else if rssMB >= webRendererAutoRecoverThresholdMB {
-            recoverWebRendererIfSafe(reason: "\(reasonPrefix)-auto-\(rssMB)MB", rssMB: rssMB)
-        } else if rssMB >= webRendererWarningThresholdMB {
+        if rssMB >= webRendererWarningThresholdMB {
             print("⚠️ Web renderer RSS warning: \(rssMB)MB")
         }
-    }
 
-    private func recoverWebRendererIfSafe(reason: String, rssMB: Int) {
-        if shouldDelayAutomaticWebRendererRecovery(rssMB: rssMB) {
-            showToast(message: "Web 렌더러 메모리 높음: \(rssMB)MB")
+        guard rssMB >= webRendererEmergencyThresholdMB,
+              isSystemMemoryPressureCritical,
+              !NSApp.isActive else {
+            consecutiveEmergencyMemorySamples = 0
             return
         }
 
+        consecutiveEmergencyMemorySamples += 1
+        guard consecutiveEmergencyMemorySamples >= webRendererEmergencySampleCount else { return }
+        consecutiveEmergencyMemorySamples = 0
+        recoverWebRendererIfSafe(reason: "\(reasonPrefix)-emergency-\(rssMB)MB", rssMB: rssMB)
+    }
+
+    private func recoverWebRendererIfSafe(reason: String, rssMB: Int) {
         let js = """
         (function() {
             var el = document.querySelector('#prompt-textarea') || document.querySelector('textarea');
@@ -720,23 +701,12 @@ class DeskGPTViewController: NSViewController, WKNavigationDelegate, WKUIDelegat
             guard let self = self else { return }
             let hasDraft = (result as? Bool) ?? false
             if !hasDraft || error != nil {
-                self.recoverWebRenderer(reason: reason, rssMB: rssMB)
+                self.recoverWebRenderer(reason: reason)
             } else {
                 self.showToast(message: "Web 렌더러 메모리 높음: \(rssMB)MB")
                 print("⚠️ Skipping Web renderer recovery because composer has draft text: \(rssMB)MB")
             }
         }
-    }
-
-    private func shouldDelayAutomaticWebRendererRecovery(rssMB: Int) -> Bool {
-        guard let lastRecoveryAt = lastWebRendererRecoveryAt else { return false }
-        let elapsed = Date().timeIntervalSince(lastRecoveryAt)
-        guard elapsed < webRendererRecoveryCooldownSeconds else { return false }
-
-        if let previousRSS = lastWebRendererRecoveryRSSMB, rssMB >= previousRSS - 100 {
-            print("⚠️ Delaying Web renderer recovery; RSS stayed high after reload: \(rssMB)MB")
-        }
-        return true
     }
 
     private func updateWindowTitle(webRendererRSSMB rssMB: Int?) {

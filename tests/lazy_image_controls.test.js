@@ -24,8 +24,8 @@ assert(
 );
 
 assert(
-  source.includes('content-visibility: auto') &&
-    source.includes('contain-intrinsic-size') &&
-    source.includes('conversation-turn'),
-  'DeskGPT should apply offscreen conversation turn containment to reduce long-chat layout work'
+  !source.includes('content-visibility: auto') &&
+    !source.includes('contain-intrinsic-size') &&
+    !source.includes('deskgpt-long-chat-containment'),
+  'DeskGPT should not inject containment CSS that redraws conversation turns while scrolling'
 );
